@@ -1,0 +1,3 @@
+<!doctype html><html><body><p>fixture-post</p>
+<button id="post" onclick="fetch('/echo', {method: 'POST', body: 'page'}).then(r => r.text()).then(t => document.body.dataset.echo = t)">post</button>
+</body></html>

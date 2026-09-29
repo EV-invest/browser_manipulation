@@ -1,6 +1,6 @@
 [package]
 name = "browser_manipulation"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2024"
 
 [dependencies]
@@ -18,6 +18,7 @@ thiserror.workspace = true
 tokio = { workspace = true, features = ["time", "sync"] }
 
 [dev-dependencies]
+playwright-rs.workspace = true
 png.workspace = true
 tempfile.workspace = true
 tokio = { workspace = true, features = ["macros", "rt-multi-thread", "net", "io-util"] }

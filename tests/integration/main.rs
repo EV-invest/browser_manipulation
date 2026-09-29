@@ -29,6 +29,15 @@ fn fixtures() -> &'static str {
 					let path = path.trim_start_matches('/');
 					let (status, body) = match (path, std::fs::read(dir.join(path))) {
 						("headers", _) => ("200 OK", head.clone().into_bytes()),
+						("echo", _) => {
+							let len = head
+								.lines()
+								.find_map(|l| l.to_ascii_lowercase().strip_prefix("content-length: ").map(|n| n.parse::<usize>().unwrap()))
+								.expect("the fixtures POST with a body");
+							let mut body = vec![0; len];
+							std::io::Read::read_exact(&mut reader, &mut body).unwrap();
+							("200 OK", body)
+						}
 						(_, Ok(b)) => ("200 OK", b),
 						(_, Err(_)) => ("404 Not Found", Vec::new()),
 					};
@@ -101,12 +110,46 @@ async fn page_sees_no_automation() {
 	let dir = tempfile::tempdir().unwrap();
 	let browser = launch(dir.path(), Robot, None).await.unwrap();
 	let mut tab = browser.tab().await.unwrap();
-	tab.goto(&format!("{}/stealth.html", fixtures())).await.unwrap();
-	tokio::time::sleep(Duration::from_millis(300)).await;
-	let webdriver: bool = tab.eval("navigator.webdriver", ()).await.unwrap();
-	let detected: String = tab.eval("document.body.dataset.detected", ()).await.unwrap();
-	let main_world: Option<u32> = tab.eval("typeof ace === 'undefined' ? null : ace.marker", ()).await.unwrap();
-	assert_eq!((webdriver, detected.as_str(), main_world), (false, "no", Some(42)));
+	for routed in [false, true] {
+		if routed {
+			tab.route("/", |_| None).await.unwrap();
+		}
+		tab.goto(&format!("{}/stealth.html", fixtures())).await.unwrap();
+		tokio::time::sleep(Duration::from_millis(300)).await;
+		let webdriver: bool = tab.eval("navigator.webdriver", ()).await.unwrap();
+		let detected: String = tab.eval("document.body.dataset.detected", ()).await.unwrap();
+		let main_world: Option<u32> = tab.eval("typeof ace === 'undefined' ? null : ace.marker", ()).await.unwrap();
+		assert_eq!((webdriver, detected.as_str(), main_world), (false, "no", Some(42)), "routed: {routed}");
+	}
+	drop(tab);
+	browser.close().await.unwrap();
+}
+
+#[tokio::test]
+async fn route_rewrites_the_page_s_own_request() {
+	let dir = tempfile::tempdir().unwrap();
+	let browser = launch(dir.path(), Robot, None).await.unwrap();
+	let mut tab = browser.tab().await.unwrap();
+	tab.goto(&format!("{}/post.html", fixtures())).await.unwrap();
+	let seen = Arc::<Mutex<Vec<(String, String, Option<Vec<u8>>)>>>::default();
+	let seen_in = seen.clone();
+	tab.route("/echo", move |r| {
+		seen_in.lock().unwrap().push((r.url.clone(), r.method.clone(), r.body.clone()));
+		Some(b"rewritten".to_vec())
+	})
+	.await
+	.unwrap();
+	let echo = async |tab: &mut browser_manipulation::Tab<'_, Robot>| {
+		tab.eval::<()>("void delete document.body.dataset.echo", ()).await.unwrap();
+		tab.click("#post").await.unwrap();
+		tab.wait_for_any(&["body[data-echo]"]).await.unwrap();
+		tab.eval::<String>("document.body.dataset.echo", ()).await.unwrap()
+	};
+
+	assert_eq!(echo(&mut tab).await, "rewritten");
+	tab.unroute("/echo").await.unwrap();
+	assert_eq!(echo(&mut tab).await, "page");
+	assert_eq!(*seen.lock().unwrap(), [(format!("{}/echo", fixtures()), "POST".to_owned(), Some(b"page".to_vec()))]);
 	drop(tab);
 	browser.close().await.unwrap();
 }
@@ -288,29 +331,55 @@ async fn headless_passes_for_chrome() {
 	browser.close().await.unwrap();
 }
 
-#[tokio::test]
-async fn attach_leaves_chrome_as_found() {
-	let dir = tempfile::tempdir().unwrap();
-	let url = format!("{}/late.html", fixtures());
-	let mut chrome = std::process::Command::new(chrome())
+/// Someone else's Chrome on `profile`, opened at `url`; its CDP endpoint.
+async fn debuggable_chrome(profile: &Path, url: &str) -> (std::process::Child, String) {
+	let chrome = std::process::Command::new(chrome())
 		.args(["--headless=new", "--remote-debugging-port=0", "--no-first-run"])
-		.arg(format!("--user-data-dir={}", dir.path().display()))
-		.arg(&url)
+		.arg(format!("--user-data-dir={}", profile.display()))
+		.arg(url)
 		.stdout(std::process::Stdio::null())
 		.stderr(std::process::Stdio::null())
 		.spawn()
 		.unwrap();
-	let port_file = dir.path().join("DevToolsActivePort");
+	let port_file = profile.join("DevToolsActivePort");
 	let port = until("DevToolsActivePort", || std::fs::read_to_string(&port_file).ok()?.lines().next().map(str::to_owned)).await;
-	let attach = || {
-		Browser::launch(
-			Launch::Attach {
-				cdp: format!("http://127.0.0.1:{port}"),
-			},
-			Robot,
-			None,
-		)
-	};
+	(chrome, format!("http://127.0.0.1:{port}"))
+}
+
+/// In an attached Chrome, a page of a context we did not make (another profile's) is filed under the default one.
+#[tokio::test]
+async fn cookies_are_the_tab_s_own() {
+	let dir = tempfile::tempdir().unwrap();
+	let (mut chrome, cdp) = debuggable_chrome(dir.path(), "about:blank").await;
+	let other = playwright_rs::Playwright::launch().await.unwrap();
+	let other_browser = other.chromium().connect_over_cdp(&cdp, None).await.unwrap();
+	let foreign = other_browser.new_context().await.unwrap().new_page().await.unwrap();
+	foreign.goto(&format!("{}/late.html", fixtures()), None).await.unwrap();
+	foreign.evaluate::<(), ()>("void (document.cookie = 'who=foreign')", None).await.unwrap();
+
+	let browser = Browser::launch(Launch::Attach { cdp }, Robot, None).await.unwrap();
+	let mut ours = browser.tab().await.unwrap();
+	ours.goto(&format!("{}/human.html", fixtures())).await.unwrap();
+	ours.eval::<()>("void (document.cookie = 'who=default')", ()).await.unwrap();
+	let theirs = until("the foreign page", || browser.tabs().into_iter().find(|t| t.url().ends_with("/late.html"))).await;
+	let who = async |tab: &browser_manipulation::Tab<'_, Robot>| tab.cookies().await.unwrap().into_iter().map(|c| format!("{}={}", c.name, c.value)).collect::<Vec<_>>();
+	assert_eq!((who(&ours).await, who(&theirs).await), (vec!["who=default".to_owned()], vec!["who=foreign".to_owned()]));
+
+	drop(theirs);
+	ours.close().await.unwrap();
+	browser.close().await.unwrap();
+	other_browser.close().await.unwrap();
+	other.shutdown().await.unwrap();
+	chrome.kill().unwrap();
+	chrome.wait().unwrap();
+}
+
+#[tokio::test]
+async fn attach_leaves_chrome_as_found() {
+	let dir = tempfile::tempdir().unwrap();
+	let url = format!("{}/late.html", fixtures());
+	let (mut chrome, cdp) = debuggable_chrome(dir.path(), &url).await;
+	let attach = || Browser::launch(Launch::Attach { cdp: cdp.clone() }, Robot, None);
 
 	let browser = attach().await.unwrap();
 	until("the open page", || browser.tabs().iter().any(|t| t.url() == url).then_some(())).await;
