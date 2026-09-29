@@ -40,6 +40,7 @@ pub struct Tab<'b, M: Motion> {
 	page: Page,
 	mouse: Point,
 	listeners: Option<Listeners>,
+	timeout: Duration,
 }
 
 impl<'b, M: Motion> Tab<'b, M> {
@@ -49,6 +50,7 @@ impl<'b, M: Motion> Tab<'b, M> {
 			page,
 			mouse: Point { x: 0., y: 0. }, // where the driver's mouse starts
 			listeners: None,
+			timeout: Duration::from_secs(30), // the driver's own
 		}
 	}
 
@@ -58,8 +60,9 @@ impl<'b, M: Motion> Tab<'b, M> {
 		self.captured(r, "goto").await
 	}
 
-	/// For every action and navigation on this tab; the driver's own is 30s.
-	pub async fn set_timeout(&self, timeout: Duration) {
+	/// For every action, wait and navigation on this tab.
+	pub async fn set_timeout(&mut self, timeout: Duration) {
+		self.timeout = timeout;
 		let ms = timeout.as_secs_f64() * 1000.;
 		self.page.set_default_timeout(ms).await;
 		self.page.set_default_navigation_timeout(ms).await;
@@ -211,14 +214,33 @@ impl<'b, M: Motion> Tab<'b, M> {
 		self.captured(r, "screenshot").await
 	}
 
-	/// The ones the page's URL is sent. Asked of the page, not its context: in an attached Chrome every profile's pages share one.
-	pub async fn cookies(&self) -> Result<Vec<Cookie>, Error> {
+	/// The ones a request to `url` would carry. Asked of the page, not its context: in an attached Chrome every profile's pages share one.
+	pub async fn cookies(&self, url: &str) -> Result<Vec<Cookie>, Error> {
 		let fail = |source| ErrorKind::Driver { op: "reading cookies", source };
 		let session = self.page.context().map_err(fail)?.new_cdp_session(&self.page).await.map_err(fail)?;
-		let got = session.send("Network.getCookies", Some(serde_json::json!({ "urls": [self.page.url()] }))).await;
+		let got = session.send("Network.getCookies", Some(serde_json::json!({ "urls": [url] }))).await;
 		session.detach().await.map_err(fail)?;
 		let got = got.map_err(fail)?;
 		Ok(serde_json::from_value(got["result"]["cookies"].clone()).unwrap_or_else(|e| panic!("Network.getCookies answers cookies ({e}): {got}")))
+	}
+
+	/// Until the cookies for `url` include `name`.
+	pub async fn wait_for_cookie(&mut self, url: &str, name: &str) -> Result<Cookie, Error> {
+		let deadline = tokio::time::Instant::now() + self.timeout;
+		let r = loop {
+			if let Some(c) = self.cookies(url).await?.into_iter().find(|c| c.name == name) {
+				break Ok(c);
+			}
+			if tokio::time::Instant::now() >= deadline {
+				break Err(ErrorKind::Timeout {
+					op: "wait_for_cookie",
+					target: format!("{name} for {url}"),
+					source: playwright_rs::Error::Timeout(format!("{:?} exceeded", self.timeout)),
+				});
+			}
+			tokio::time::sleep(Duration::from_millis(250)).await; // ponytail: polls; CDP cookie events if 250ms latency ever matters
+		};
+		self.captured(r, "wait_for_cookie").await
 	}
 
 	/// Every request from now on whose URL contains `url_part` goes through `f`: `Some` sends it with that body instead, `None` as it was.
