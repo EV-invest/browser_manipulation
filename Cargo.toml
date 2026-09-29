@@ -15,9 +15,21 @@ get_first = "allow"
 get_last_with_len = "allow"
 manual_is_multiple_of = "allow"
 
+[workspace.lints.rust]
+unused_features = "allow"
+
 [workspace.dependencies]
-derive-new = "^0"
-color-eyre = "^0.6.5"
+bon = "3.10"
+crc32fast = "1.5"
+derive_more = "2"
+futures = "0.3"
+jiff = "0.2"
 miette = { version = "^7.6.0", features = ["fancy", "serde", "syntect-highlighter"] }
-clap = { version = "^4.5.4", features = ["derive"] }
-v_utils = { version = "^2.15.0", features = ["io", "macros", "cli"] }
+playwright-rs = "=0.19.0"
+png = "0.18"
+rand = "0.9"
+serde = "1"
+serde_json = "1"
+tempfile = "3"
+thiserror = "2"
+tokio = "1"

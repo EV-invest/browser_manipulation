@@ -4,12 +4,27 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
-derive-new.workspace = true
-color-eyre.workspace = true
+bon.workspace = true
+crc32fast.workspace = true
+derive_more = { workspace = true, features = ["display"] }
+futures.workspace = true
+jiff.workspace = true
 miette.workspace = true
-clap.workspace = true
-v_utils.workspace = true
-browser_manipulation_macros = { path = "../browser_manipulation_macros" }
+playwright-rs.workspace = true
+rand.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tokio = { workspace = true, features = ["time", "sync"] }
+
+[dev-dependencies]
+png.workspace = true
+tempfile.workspace = true
+tokio = { workspace = true, features = ["macros", "rt-multi-thread", "net", "io-util"] }
 
 [lints]
 workspace = true
+
+[[test]]
+name = "integration"
+path = "../tests/integration/main.rs"

@@ -1,0 +1,10 @@
+<!doctype html><html><body><p>fixture-late</p>
+<script>
+setTimeout(() => {
+	const b = document.createElement('button');
+	b.id = 'late';
+	b.textContent = 'late';
+	b.onclick = () => (document.body.dataset.clicked = 'yes');
+	document.body.append(b);
+}, 500);
+</script></body></html>

@@ -1,0 +1,15 @@
+<!doctype html><html><body><p>fixture-human</p>
+<input id="t"><button id="b" style="margin:200px">b</button>
+<script>
+const moves = [], keys = [];
+addEventListener('mousemove', e => e.isTrusted && moves.push(1), true);
+addEventListener('keydown', e => {
+	if (!e.isTrusted) return;
+	keys.push(e.timeStamp);
+	document.body.dataset.keydowns = JSON.stringify(keys);
+}, true);
+document.getElementById('b').onclick = e => {
+	document.body.dataset.moves = moves.length;
+	document.body.dataset.trusted = e.isTrusted;
+};
+</script></body></html>

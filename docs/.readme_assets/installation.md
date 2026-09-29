@@ -1,0 +1,1 @@
+Needs the `patchright-core` driver at `playwright_rs::PLAYWRIGHT_VERSION`: consume this flake's `packages.patchright` and set `PLAYWRIGHT_CLI_JS=${patchright}/package/cli.js`, `PLAYWRIGHT_NODE_EXE=${nodejs}/bin/node`, `PLAYWRIGHT_SKIP_DRIVER_DOWNLOAD=1`.

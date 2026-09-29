@@ -27,9 +27,21 @@
           build = {
             deny = false;
             workspace = let deprecate_by = "v1.0.0"; in {
-              "./browser_manipulation/" = [ "git_version" "log_directives" { deprecate = { by_version = deprecate_by; force = true; }; } ];
+              "./browser_manipulation/" = [{ deprecate = { by_version = deprecate_by; force = true; }; }];
             };
           };
+        };
+        patchright = pkgs.stdenvNoCC.mkDerivation {
+          pname = "patchright-core";
+          version = "1.63.0";
+          src = pkgs.fetchurl {
+            url = "https://registry.npmjs.org/patchright-core/-/patchright-core-1.63.0.tgz";
+            sha256 = "0v5fqh1qhbfmghhdcckm8hiv039bnh0cchr1s57zclbyfz2b6649";
+          };
+          installPhase = ''
+            mkdir -p $out/package
+            cp -r . $out/package/
+          '';
         };
         github = v_flakes.github {
           inherit pkgs pname rs;
@@ -49,8 +61,9 @@
       {
         packages =
           let
-            rustc = rust;
-            cargo = rust;
+            build_rust = v_flakes.rs.build_nightly system;
+            rustc = build_rust;
+            cargo = build_rust;
             rustPlatform = pkgs.makeRustPlatform {
               inherit rustc cargo stdenv;
             };
@@ -68,6 +81,7 @@
               cargoLock.lockFile = ./Cargo.lock;
               src = pkgs.lib.cleanSource ./.;
             };
+            inherit patchright;
           };
 
         devShells.default =
@@ -86,10 +100,16 @@
               openssl
               pkg-config
               rust
+              nodejs
+              chromium
             ] ++ pre-commit-check.enabledPackages ++ combined.enabledPackages;
 
             env.RUST_BACKTRACE = 1;
             env.RUST_LIB_BACKTRACE = 0;
+            env.PLAYWRIGHT_CLI_JS = "${patchright}/package/cli.js";
+            env.PLAYWRIGHT_NODE_EXE = "${pkgs.nodejs}/bin/node";
+            env.PLAYWRIGHT_SKIP_DRIVER_DOWNLOAD = "1";
+            env.BM_TEST_CHROME = "${pkgs.chromium}/bin/chromium";
           };
       }
     );

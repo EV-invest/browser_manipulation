@@ -1,0 +1,11 @@
+<!doctype html><html><body><p>fixture-stealth</p>
+<script>
+window.ace = { marker: 42 };
+document.body.dataset.detected = 'no';
+setInterval(() => {
+	// a CDP client with Runtime enabled serializes console arguments, which reads `stack`
+	const e = new Error();
+	Object.defineProperty(e, 'stack', { get() { document.body.dataset.detected = 'yes'; return ''; } });
+	console.debug(e);
+}, 50);
+</script></body></html>
