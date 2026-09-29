@@ -4,7 +4,7 @@ use std::{
 	sync::Mutex,
 };
 
-use playwright_rs::{BrowserContext, BrowserContextOptions, Playwright, Viewport};
+use playwright_rs::{BrowserContext, BrowserContextOptions, LaunchOptions, Playwright, Viewport};
 
 use crate::{Artifacts, Error, ErrorKind, Motion, Tab};
 
@@ -46,6 +46,10 @@ impl<M: Motion> Browser<M> {
 				viewport,
 			} => {
 				let options = BrowserContextOptions::builder().headless(headless).executable_path(executable.display().to_string());
+				let options = match headless {
+					true => options.user_agent(headed_ua(&playwright, &executable).await?),
+					false => options,
+				};
 				let options = match viewport {
 					Some((width, height)) => options.viewport(Viewport { width, height }),
 					None => options.no_viewport(true),
@@ -93,6 +97,28 @@ impl<M: Motion> Browser<M> {
 		self.playwright.shutdown().await.map_err(|source| ErrorKind::Driver { op: "stopping the driver", source })?;
 		Ok(())
 	}
+}
+
+/// Headless Chromium says `HeadlessChrome` in every UA it sends; the client hints already match headed. Read off a throwaway launch, as
+/// only a context-wide UA reaches every page, popups included, before its first request.
+async fn headed_ua(playwright: &Playwright, executable: &Path) -> Result<String, Error> {
+	let fail = |source| ErrorKind::Driver {
+		op: "reading the browser's UA",
+		source,
+	};
+	let probe = playwright
+		.chromium()
+		.launch_with_options(LaunchOptions::new().headless(true).executable_path(executable.display().to_string()))
+		.await
+		.map_err(ErrorKind::Launch)?;
+	let version = async { probe.new_browser_cdp_session().await?.send("Browser.getVersion", None).await }.await;
+	probe.close().await.map_err(fail)?;
+	let version = version.map_err(fail)?;
+	let ua = version["result"]["userAgent"]
+		.as_str()
+		.unwrap_or_else(|| panic!("Browser.getVersion always carries userAgent: {version}"));
+	assert!(ua.contains("HeadlessChrome/"), "a headless chromium says so in its UA: {ua}");
+	Ok(ua.replace("HeadlessChrome/", "Chrome/"))
 }
 
 /// playwright-rs takes whichever driver the env names; only patchright's keeps `Runtime.enable` off the page.

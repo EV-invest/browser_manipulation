@@ -250,6 +250,10 @@ impl<'b, M: Motion> Tab<'b, M> {
 		self.captured(r, "bring_to_front").await
 	}
 
+	pub async fn close(self) -> Result<(), Error> {
+		Ok(self.page.close().await.map_err(|source| ErrorKind::Driver { op: "closing a tab", source })?)
+	}
+
 	/// The page as it is now, into `Artifacts`; `None` without them.
 	pub async fn capture(&self, hint: &str) -> Option<Result<Capture, String>> {
 		let artifacts = self.browser.artifacts.as_ref()?;
@@ -336,7 +340,7 @@ impl<'b, M: Motion> Tab<'b, M> {
 
 fn classify(op: &'static str, target: &str, source: playwright_rs::Error) -> ErrorKind {
 	let target = target.to_owned();
-	// ponytail: playwright-rs 0.19 drops the server's `name: "TimeoutError"` into ProtocolError; match on `Error::Timeout` alone once upstream maps it
+	// ponytail: playwright-rs 0.19 drops the server's `name: "TimeoutError"` into ProtocolError; match on `Error::Timeout` alone once padamson/playwright-rust#159 is released
 	let timed_out = match &source {
 		playwright_rs::Error::Timeout(_) => true,
 		playwright_rs::Error::ProtocolError(m) => m.contains("\n TimeoutError: "),

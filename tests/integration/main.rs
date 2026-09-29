@@ -2,11 +2,11 @@ use std::{
 	io::{BufRead as _, BufReader, Write as _},
 	net::TcpListener,
 	path::{Path, PathBuf},
-	sync::OnceLock,
+	sync::{Arc, Mutex, OnceLock},
 	time::Duration,
 };
 
-use browser_manipulation::{Artifacts, Browser, ErrorKind, Launch, Motion, Noise, Robot};
+use browser_manipulation::{Act, Artifacts, Browser, ErrorKind, Keys, Launch, Motion, Noise, Point, Rect, Robot};
 use futures::StreamExt as _;
 
 /// Serves `tests/fixtures`; `file://` pages can't `fetch`.
@@ -19,27 +19,48 @@ fn fixtures() -> &'static str {
 		std::thread::spawn(move || {
 			for stream in listener.incoming() {
 				let mut stream = stream.unwrap();
-				let mut line = String::new();
-				BufReader::new(&stream).read_line(&mut line).unwrap();
-				let Some(path) = line.split(' ').nth(1) else { continue }; // chromium's speculative preconnects close without a request
-				let path = path.trim_start_matches('/');
-				let (status, body) = match std::fs::read(dir.join(path)) {
-					Ok(b) => ("200 OK", b),
-					Err(_) => ("404 Not Found", Vec::new()),
-				};
-				let kind = if path.ends_with(".json") { "application/json" } else { "text/html" };
-				write!(stream, "HTTP/1.1 {status}\r\nContent-Type: {kind}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n", body.len()).unwrap();
-				stream.write_all(&body).unwrap();
+				let dir = dir.clone();
+				std::thread::spawn(move || {
+					// an idle preconnect must not hold up the requests behind it
+					let mut head = String::new();
+					let mut reader = BufReader::new(&stream);
+					while reader.read_line(&mut head).unwrap() > 2 {} // up to the blank line ending the head
+					let Some(path) = head.split(' ').nth(1) else { return }; // chromium's speculative preconnects close without a request
+					let path = path.trim_start_matches('/');
+					let (status, body) = match (path, std::fs::read(dir.join(path))) {
+						("headers", _) => ("200 OK", head.clone().into_bytes()),
+						(_, Ok(b)) => ("200 OK", b),
+						(_, Err(_)) => ("404 Not Found", Vec::new()),
+					};
+					let kind = if path.ends_with(".json") { "application/json" } else { "text/html" };
+					write!(stream, "HTTP/1.1 {status}\r\nContent-Type: {kind}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n", body.len()).unwrap();
+					stream.write_all(&body).unwrap();
+				});
 			}
 		});
 		base
 	})
 }
 
+fn chrome() -> PathBuf {
+	PathBuf::from(std::env::var("BM_TEST_CHROME").expect("set by the flake's devShell"))
+}
+
+async fn until<T>(what: &str, mut f: impl FnMut() -> Option<T>) -> T {
+	let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+	loop {
+		if let Some(v) = f() {
+			return v;
+		}
+		assert!(tokio::time::Instant::now() < deadline, "no {what} in 10s");
+		tokio::time::sleep(Duration::from_millis(50)).await;
+	}
+}
+
 async fn launch<M: Motion>(profile: &Path, motion: M, artifacts: Option<Artifacts>) -> Result<Browser<M>, browser_manipulation::Error> {
 	let launch = Launch::Owned {
 		profile: profile.to_owned(),
-		executable: PathBuf::from(std::env::var("BM_TEST_CHROME").expect("set by the flake's devShell")),
+		executable: chrome(),
 		headless: true,
 		viewport: Some((1280, 800)),
 	};
@@ -185,4 +206,124 @@ async fn responses_yield_bodies() {
 	assert_eq!((r.status, String::from_utf8(r.body).unwrap().trim()), (200, r#"{"feed":[1,2,3]}"#));
 	drop(tab);
 	browser.close().await.unwrap();
+}
+
+/// `Noise`, remembering every notch it hands out.
+struct Recorded(Noise, Arc<Mutex<Vec<f64>>>);
+
+impl Motion for Recorded {
+	const NATIVE: bool = false;
+
+	fn pause(&mut self, act: Act) -> Duration {
+		self.0.pause(act)
+	}
+
+	fn aim(&mut self, bbox: Rect) -> Point {
+		self.0.aim(bbox)
+	}
+
+	fn path(&mut self, from: Point, to: Point) -> Vec<(Point, Duration)> {
+		self.0.path(from, to)
+	}
+
+	fn keys(&mut self, text: &str) -> Keys {
+		self.0.keys(text)
+	}
+
+	fn wheel(&mut self, dy: f64) -> Vec<(f64, Duration)> {
+		let notches = self.0.wheel(dy);
+		self.1.lock().unwrap().extend(notches.iter().map(|&(d, _)| d));
+		notches
+	}
+}
+
+#[tokio::test]
+async fn scroll_turns_the_wheel_notch_by_notch() {
+	let dir = tempfile::tempdir().unwrap();
+	let notches = Arc::<Mutex<Vec<f64>>>::default();
+	let browser = launch(dir.path(), Recorded(noise(), notches.clone()), None).await.unwrap();
+	let mut tab = browser.tab().await.unwrap();
+	tab.goto(&format!("{}/scroll.html", fixtures())).await.unwrap();
+	tab.scroll(None, 600.).await.unwrap();
+	tab.scroll(None, 600.).await.unwrap();
+	let notches = notches.lock().unwrap().clone();
+	let mut last = f64::NAN;
+	let (wheels, y) = loop {
+		tokio::time::sleep(Duration::from_millis(200)).await;
+		let (wheels, y): (Option<String>, f64) = tab.eval("[document.body.dataset.wheels ?? null, scrollY]", ()).await.unwrap();
+		match y == last {
+			true => break (wheels, y), // smooth scrolling has settled
+			false => last = y,
+		}
+	};
+	let wheels: Vec<f64> = serde_json::from_str(&wheels.expect("wheel events arrived")).unwrap();
+	assert_eq!(wheels.len(), notches.len(), "{wheels:?} vs {notches:?}");
+	assert!(wheels.iter().zip(&notches).all(|(w, n)| (w - n).abs() < 1.), "{wheels:?} vs {notches:?}");
+	let sum: f64 = notches.iter().sum();
+	assert!((y - sum).abs() < notches.len() as f64, "scrollY {y}, notches sum {sum}");
+	drop(tab);
+	browser.close().await.unwrap();
+}
+
+#[tokio::test]
+async fn headless_passes_for_chrome() {
+	let dir = tempfile::tempdir().unwrap();
+	let browser = launch(dir.path(), Robot, None).await.unwrap();
+	let mut tab = browser.tab().await.unwrap();
+	let sent_ua = |headers: &str| headers.lines().find_map(|l| l.strip_prefix("User-Agent: ")).expect("chromium sends a UA").to_owned();
+
+	tab.goto(&format!("{}/headers", fixtures())).await.unwrap();
+	let page_ua: String = tab.eval("navigator.userAgent", ()).await.unwrap();
+	let request_ua = sent_ua(&tab.content().await.unwrap());
+
+	tab.goto(&format!("{}/popup.html", fixtures())).await.unwrap();
+	tab.click("#open").await.unwrap();
+	let mut popup = until("popup", || browser.tabs().into_iter().find(|t| t.url().ends_with("/headers"))).await;
+	let popup_ua = sent_ua(&popup.content().await.unwrap());
+
+	for ua in [&page_ua, &request_ua, &popup_ua] {
+		assert!(ua.contains(" Chrome/") && !ua.contains("Headless"), "{ua}");
+	}
+	drop((tab, popup));
+	browser.close().await.unwrap();
+}
+
+#[tokio::test]
+async fn attach_leaves_chrome_as_found() {
+	let dir = tempfile::tempdir().unwrap();
+	let url = format!("{}/late.html", fixtures());
+	let mut chrome = std::process::Command::new(chrome())
+		.args(["--headless=new", "--remote-debugging-port=0", "--no-first-run"])
+		.arg(format!("--user-data-dir={}", dir.path().display()))
+		.arg(&url)
+		.stdout(std::process::Stdio::null())
+		.stderr(std::process::Stdio::null())
+		.spawn()
+		.unwrap();
+	let port_file = dir.path().join("DevToolsActivePort");
+	let port = until("DevToolsActivePort", || std::fs::read_to_string(&port_file).ok()?.lines().next().map(str::to_owned)).await;
+	let attach = || {
+		Browser::launch(
+			Launch::Attach {
+				cdp: format!("http://127.0.0.1:{port}"),
+			},
+			Robot,
+			None,
+		)
+	};
+
+	let browser = attach().await.unwrap();
+	until("the open page", || browser.tabs().iter().any(|t| t.url() == url).then_some(())).await;
+	let mut ours = browser.tab().await.unwrap();
+	ours.goto(&format!("{}/human.html", fixtures())).await.unwrap();
+	ours.close().await.unwrap();
+	browser.close().await.unwrap();
+	assert!(chrome.try_wait().unwrap().is_none(), "disconnecting killed the attached chrome");
+
+	let again = attach().await.unwrap();
+	let urls: Vec<String> = again.tabs().iter().map(|t| t.url()).collect();
+	assert_eq!(urls, [url]);
+	again.close().await.unwrap();
+	chrome.kill().unwrap();
+	chrome.wait().unwrap();
 }

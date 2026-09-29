@@ -1,0 +1,9 @@
+<!doctype html><html><body style="height:20000px"><p>fixture-scroll</p>
+<script>
+const wheels = [];
+addEventListener('wheel', e => {
+	if (!e.isTrusted) return;
+	wheels.push(e.deltaY);
+	document.body.dataset.wheels = JSON.stringify(wheels);
+}, { passive: true });
+</script></body></html>
