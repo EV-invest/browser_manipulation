@@ -27,8 +27,13 @@ fn fixtures() -> &'static str {
 					while reader.read_line(&mut head).unwrap() > 2 {} // up to the blank line ending the head
 					let Some(path) = head.split(' ').nth(1) else { return }; // chromium's speculative preconnects close without a request
 					let path = path.trim_start_matches('/');
+					let mut extra = "";
 					let (status, body) = match (path, std::fs::read(dir.join(path))) {
 						("headers", _) => ("200 OK", head.clone().into_bytes()),
+						("session", _) => {
+							extra = "Set-Cookie: session=1; HttpOnly\r\n";
+							("200 OK", Vec::new())
+						}
 						("echo", _) => {
 							let len = head
 								.lines()
@@ -42,7 +47,12 @@ fn fixtures() -> &'static str {
 						(_, Err(_)) => ("404 Not Found", Vec::new()),
 					};
 					let kind = if path.ends_with(".json") { "application/json" } else { "text/html" };
-					write!(stream, "HTTP/1.1 {status}\r\nContent-Type: {kind}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n", body.len()).unwrap();
+					write!(
+						stream,
+						"HTTP/1.1 {status}\r\nContent-Type: {kind}\r\nContent-Length: {}\r\n{extra}Connection: close\r\n\r\n",
+						body.len()
+					)
+					.unwrap();
 					stream.write_all(&body).unwrap();
 				});
 			}
@@ -383,7 +393,14 @@ async fn cookies_are_the_tab_s_own() {
 	ours.goto(&format!("{}/human.html", fixtures())).await.unwrap();
 	ours.eval::<()>("void (document.cookie = 'who=default')", ()).await.unwrap();
 	let theirs = until("the foreign page", || browser.tabs().into_iter().find(|t| t.url().ends_with("/late.html"))).await;
-	let who = async |tab: &browser_manipulation::Tab<'_, Robot>| tab.cookies().await.unwrap().into_iter().map(|c| format!("{}={}", c.name, c.value)).collect::<Vec<_>>();
+	let who = async |tab: &browser_manipulation::Tab<'_, Robot>| {
+		tab.cookies(&format!("{}/", fixtures()))
+			.await
+			.unwrap()
+			.into_iter()
+			.map(|c| format!("{}={}", c.name, c.value))
+			.collect::<Vec<_>>()
+	};
 	assert_eq!((who(&ours).await, who(&theirs).await), (vec!["who=default".to_owned()], vec!["who=foreign".to_owned()]));
 
 	drop(theirs);
@@ -416,4 +433,55 @@ async fn attach_leaves_chrome_as_found() {
 	again.close().await.unwrap();
 	chrome.kill().unwrap();
 	chrome.wait().unwrap();
+}
+
+#[tokio::test]
+async fn cookies_are_the_ones_sent_to_the_url() {
+	let dir = tempfile::tempdir().unwrap();
+	let browser = launch(dir.path(), Robot, None).await.unwrap();
+	let mut tab = browser.tab().await.unwrap();
+	let page = format!("{}/cookies.html", fixtures());
+	tab.goto(&page).await.unwrap();
+	let names = async |tab: &browser_manipulation::Tab<'_, Robot>, url: &str| tab.cookies(url).await.unwrap().into_iter().map(|c| c.name).collect::<Vec<_>>();
+	assert!(names(&tab, &format!("{}/api/x", fixtures())).await.contains(&"scoped".to_owned()));
+	assert!(!names(&tab, &page).await.contains(&"scoped".to_owned()));
+	drop(tab);
+	browser.close().await.unwrap();
+}
+
+#[tokio::test]
+async fn wait_for_cookie_sees_server_and_script_cookies() {
+	let dir = tempfile::tempdir().unwrap();
+	let browser = launch(dir.path(), Robot, None).await.unwrap();
+	let mut tab = browser.tab().await.unwrap();
+	tab.goto(&format!("{}/cookies.html", fixtures())).await.unwrap();
+	let origin = format!("{}/", fixtures());
+	let late = tab.wait_for_cookie(&origin, "late").await.unwrap();
+	let session = tab.wait_for_cookie(&origin, "session").await.unwrap();
+	assert_eq!((late.value.as_str(), session.value.as_str(), session.http_only), ("1", "1", true));
+	drop(tab);
+	browser.close().await.unwrap();
+}
+
+#[tokio::test]
+async fn wait_for_cookie_times_out_with_capture() {
+	let dir = tempfile::tempdir().unwrap();
+	let browser = launch(
+		&dir.path().join("profile"),
+		Robot,
+		Some(Artifacts {
+			dir: dir.path().join("artifacts"),
+			retention: Duration::from_secs(3600),
+		}),
+	)
+	.await
+	.unwrap();
+	let mut tab = browser.tab().await.unwrap();
+	tab.set_timeout(Duration::from_millis(800)).await;
+	tab.goto(&format!("{}/cookies.html", fixtures())).await.unwrap();
+	let err = tab.wait_for_cookie(&format!("{}/", fixtures()), "never").await.unwrap_err();
+	assert!(matches!(*err.kind, ErrorKind::Timeout { .. }), "{err:?}");
+	err.capture.expect("artifacts set").expect("page is alive");
+	drop(tab);
+	browser.close().await.unwrap();
 }

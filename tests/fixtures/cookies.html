@@ -1,0 +1,10 @@
+<!doctype html>
+<body>
+<script>
+	document.cookie = 'scoped=1; path=/api';
+	setTimeout(() => {
+		document.cookie = 'late=1';
+		fetch('/session');
+	}, 300);
+</script>
+</body>
