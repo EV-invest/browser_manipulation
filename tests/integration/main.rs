@@ -6,7 +6,7 @@ use std::{
 	time::Duration,
 };
 
-use browser_manipulation::{Act, Artifacts, Browser, ErrorKind, Keys, Launch, Motion, Noise, Point, Rect, Robot};
+use browser_manipulation::{Act, Artifacts, Browser, ErrorKind, Keys, Launch, Motion, Noise, Point, Rect, Robot, Shot, Viewport};
 use futures::StreamExt as _;
 
 /// Serves `tests/fixtures`; `file://` pages can't `fetch`.
@@ -67,11 +67,19 @@ async fn until<T>(what: &str, mut f: impl FnMut() -> Option<T>) -> T {
 }
 
 async fn launch<M: Motion>(profile: &Path, motion: M, artifacts: Option<Artifacts>) -> Result<Browser<M>, browser_manipulation::Error> {
+	launch_at(profile, 1., motion, artifacts).await
+}
+
+async fn launch_at<M: Motion>(profile: &Path, device_scale_factor: f64, motion: M, artifacts: Option<Artifacts>) -> Result<Browser<M>, browser_manipulation::Error> {
 	let launch = Launch::Owned {
 		profile: profile.to_owned(),
 		executable: chrome(),
 		headless: true,
-		viewport: Some((1280, 800)),
+		viewport: Some(Viewport {
+			width: 1280,
+			height: 800,
+			device_scale_factor,
+		}),
 	};
 	Browser::launch(launch, motion, artifacts).await
 }
@@ -150,6 +158,19 @@ async fn route_rewrites_the_page_s_own_request() {
 	tab.unroute("/echo").await.unwrap();
 	assert_eq!(echo(&mut tab).await, "page");
 	assert_eq!(*seen.lock().unwrap(), [(format!("{}/echo", fixtures()), "POST".to_owned(), Some(b"page".to_vec()))]);
+	drop(tab);
+	browser.close().await.unwrap();
+}
+
+#[tokio::test]
+async fn screenshots_are_scaled_by_the_device() {
+	let dir = tempfile::tempdir().unwrap();
+	let browser = launch_at(dir.path(), 2., Robot, None).await.unwrap();
+	let mut tab = browser.tab().await.unwrap();
+	tab.goto(&format!("{}/human.html", fixtures())).await.unwrap();
+	let png = tab.screenshot(Shot::Full).await.unwrap();
+	let width = png::Decoder::new(std::io::Cursor::new(png)).read_info().unwrap().info().width;
+	assert_eq!(width, 2 * 1280);
 	drop(tab);
 	browser.close().await.unwrap();
 }

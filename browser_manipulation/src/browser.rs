@@ -4,7 +4,7 @@ use std::{
 	sync::Mutex,
 };
 
-use playwright_rs::{BrowserContext, BrowserContextOptions, LaunchOptions, Playwright, Viewport};
+use playwright_rs::{BrowserContext, BrowserContextOptions, LaunchOptions, Playwright};
 
 use crate::{Artifacts, Error, ErrorKind, Motion, Tab};
 
@@ -14,11 +14,19 @@ pub enum Launch {
 		profile: PathBuf,
 		executable: PathBuf,
 		headless: bool,
-		/// `None`: the page takes the window's size.
-		viewport: Option<(u32, u32)>,
+		/// `None`: the page takes the window's size and density.
+		viewport: Option<Viewport>,
 	},
 	/// Someone else's running Chrome, by its CDP endpoint. Closing only disconnects.
 	Attach { cdp: String },
+}
+
+/// The page's size in CSS px; a screenshot is `device_scale_factor` times that in pixels.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Viewport {
+	pub width: u32,
+	pub height: u32,
+	pub device_scale_factor: f64,
 }
 
 pub struct Browser<M: Motion> {
@@ -51,7 +59,7 @@ impl<M: Motion> Browser<M> {
 					false => options,
 				};
 				let options = match viewport {
-					Some((width, height)) => options.viewport(Viewport { width, height }),
+					Some(Viewport { width, height, device_scale_factor }) => options.viewport(playwright_rs::Viewport { width, height }).device_scale_factor(device_scale_factor),
 					None => options.no_viewport(true),
 				};
 				let context = playwright

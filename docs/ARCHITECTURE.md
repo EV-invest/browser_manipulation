@@ -11,7 +11,7 @@ consumer ──▶ Browser<M: Motion> ──tab()──▶ Tab<'_, M> ──ever
    └──────────── Error{kind, capture} (paths rendered in the diagnostic)
 ```
 
-- `browser.rs` — launch/attach, driver assertion, profile lock.
+- `browser.rs` — launch/attach, driver assertion, profile lock. A `Viewport` carries its `device_scale_factor`: the driver takes one only with a viewport.
 - `tab.rs` — the whole action surface; each action is paced and shaped by `Motion`, and captured on failure. Beside the actions: `responses` (bodies of what the page fetches), `route` (the page's own requests, sent with a rewritten body), `cookies` (asked of the page's target, since an attached Chrome files every profile's pages under one context).
 - `motion.rs` — `Motion` trait; `Robot` (driver-native, instant) and `Noise` (human-shaped).
 - `capture.rs` — `Artifacts` directory with retention; PNG provenance.

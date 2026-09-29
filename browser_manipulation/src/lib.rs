@@ -5,7 +5,7 @@ mod error;
 mod motion;
 mod tab;
 
-pub use browser::{Browser, Launch};
+pub use browser::{Browser, Launch, Viewport};
 pub use capture::{Artifacts, Capture};
 pub use error::{Error, ErrorKind};
 pub use motion::{Act, Key, Keys, Motion, Noise, Point, Rect, Robot};
