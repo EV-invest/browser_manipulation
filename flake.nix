@@ -114,8 +114,9 @@
           type = "app";
           program = "${pkgs.writeShellApplication {
             name = "integration";
-            runtimeInputs = [ rust pkgs.mold pkgs.pkg-config pkgs.openssl pkgs.nodejs pkgs.chromium stdenv.cc ];
+            runtimeInputs = [ rust pkgs.mold pkgs.pkg-config pkgs.nodejs pkgs.chromium stdenv.cc ];
             text = ''
+              export PKG_CONFIG_PATH=${pkgs.openssl.dev}/lib/pkgconfig LD_LIBRARY_PATH=${pkgs.openssl.out}/lib
               export RUSTC_WRAPPER="" ${pkgs.lib.concatStringsSep " " (pkgs.lib.mapAttrsToList (k: v: "${k}=${v}") driverEnv)}
               cargo test
             '';
