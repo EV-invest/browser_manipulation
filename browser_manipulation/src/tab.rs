@@ -4,7 +4,10 @@ use std::{
 };
 
 use futures::{Stream, StreamExt as _, channel::mpsc};
-use playwright_rs::{Cookie, Locator, Page, ScreenshotOptions, WaitForOptions, WaitForState, protocol::ResponseObject};
+use playwright_rs::{
+	Cookie, Locator, Page, ScreenshotOptions, WaitForOptions, WaitForState,
+	protocol::{ContinueOptions, ResponseObject},
+};
 use serde::{Serialize, de::DeserializeOwned};
 
 use crate::{Act, Browser, Capture, Error, ErrorKind, Key, Keys, Motion, Point, Rect};
@@ -23,6 +26,13 @@ pub struct Response {
 	pub url: String,
 	pub status: u16,
 	pub body: Vec<u8>,
+}
+
+/// A request as the page sends it, before it leaves.
+pub struct Request {
+	pub url: String,
+	pub method: String,
+	pub body: Option<Vec<u8>>,
 }
 
 pub struct Tab<'b, M: Motion> {
@@ -201,9 +211,45 @@ impl<'b, M: Motion> Tab<'b, M> {
 		self.captured(r, "screenshot").await
 	}
 
+	/// The ones the page's URL is sent. Asked of the page, not its context: in an attached Chrome every profile's pages share one.
 	pub async fn cookies(&self) -> Result<Vec<Cookie>, Error> {
-		let context = self.page.context().map_err(|source| ErrorKind::Driver { op: "reading cookies", source })?;
-		Ok(context.cookies(None).await.map_err(|source| ErrorKind::Driver { op: "reading cookies", source })?)
+		let fail = |source| ErrorKind::Driver { op: "reading cookies", source };
+		let session = self.page.context().map_err(fail)?.new_cdp_session(&self.page).await.map_err(fail)?;
+		let got = session.send("Network.getCookies", Some(serde_json::json!({ "urls": [self.page.url()] }))).await;
+		session.detach().await.map_err(fail)?;
+		let got = got.map_err(fail)?;
+		Ok(serde_json::from_value(got["result"]["cookies"].clone()).unwrap_or_else(|e| panic!("Network.getCookies answers cookies ({e}): {got}")))
+	}
+
+	/// Every request from now on whose URL contains `url_part` goes through `f`: `Some` sends it with that body instead, `None` as it was.
+	/// Of overlapping routes, the last set sees the request.
+	pub async fn route(&self, url_part: &str, f: impl FnMut(&Request) -> Option<Vec<u8>> + Send + 'static) -> Result<(), Error> {
+		let f = Arc::new(Mutex::new(f));
+		let r = self
+			.page
+			.route(&glob(url_part), move |route| {
+				let f = f.clone();
+				async move {
+					let r = route.request();
+					let request = Request {
+						url: r.url().to_owned(),
+						method: r.method().to_owned(),
+						body: r.post_data_buffer(),
+					};
+					let body = f.lock().expect("never held across a panic")(&request);
+					route.continue_(body.map(|b| ContinueOptions::builder().post_data_bytes(b).build())).await
+				}
+			})
+			.await;
+		Ok(r.map_err(|source| ErrorKind::Driver { op: "routing requests", source })?)
+	}
+
+	pub async fn unroute(&self, url_part: &str) -> Result<(), Error> {
+		Ok(self
+			.page
+			.unroute(&glob(url_part))
+			.await
+			.map_err(|source| ErrorKind::Driver { op: "unrouting requests", source })?)
 	}
 
 	/// Every response from now on whose URL contains `url_part`, with its body.
@@ -336,6 +382,18 @@ impl<'b, M: Motion> Tab<'b, M> {
 		self.pause(Act::Release).await;
 		mouse.up(None).await.map_err(fail)
 	}
+}
+
+/// Any URL containing `part`.
+fn glob(part: &str) -> String {
+	let mut g = String::from("**");
+	for c in part.chars() {
+		if matches!(c, '\\' | '*' | '{' | '}') {
+			g.push('\\');
+		}
+		g.push(c);
+	}
+	g + "**"
 }
 
 fn classify(op: &'static str, target: &str, source: playwright_rs::Error) -> ErrorKind {

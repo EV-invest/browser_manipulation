@@ -10,4 +10,4 @@ pub use capture::{Artifacts, Capture};
 pub use error::{Error, ErrorKind};
 pub use motion::{Act, Key, Keys, Motion, Noise, Point, Rect, Robot};
 pub use playwright_rs::Cookie;
-pub use tab::{Response, Shot, Tab};
+pub use tab::{Request, Response, Shot, Tab};
