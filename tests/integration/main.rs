@@ -365,7 +365,7 @@ async fn headless_passes_for_chrome() {
 /// Someone else's Chrome on `profile`, opened at `url`; its CDP endpoint.
 async fn debuggable_chrome(profile: &Path, url: &str) -> (std::process::Child, String) {
 	let chrome = std::process::Command::new(chrome())
-		.args(["--headless=new", "--remote-debugging-port=0", "--no-first-run"])
+		.args(["--headless=new", "--remote-debugging-port=0", "--no-first-run", "--no-sandbox"]) // CI runners forbid the user-namespace sandbox
 		.arg(format!("--user-data-dir={}", profile.display()))
 		.arg(url)
 		.stdout(std::process::Stdio::null())

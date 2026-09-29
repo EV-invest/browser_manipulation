@@ -5,47 +5,49 @@ env:
   RUSTUP_MAX_RETRIES: '10'
   RUST_BACKTRACE: short
 jobs:
-  pre_ci:
-    uses: valeratrades/.github/.github/workflows/pre_ci.yml@main
-  rust-tests:
-    if: needs.pre_ci.outputs.continue
-    name: Rust ${{matrix.rust}}
-    needs: pre_ci
+  flake-app:
+    name: nix run .#integration
     runs-on: ubuntu-latest
     steps:
-    - uses: actions/checkout@v5
-    - uses: dtolnay/rust-toolchain@master
-      with:
-        toolchain: ${{matrix.rust}}
-    - name: Install mold
-      uses: rui314/setup-mold@v1
-    - if: github.ref == 'refs/heads/release'
-      name: Set RUSTFLAGS for release branch
-      run: echo "RUSTFLAGS=-Dwarnings" >> $GITHUB_ENV
-    - if: matrix.rust == 'nightly'
-      name: Enable type layout randomization
-      run: 'printf ''#!/bin/sh\nexec "$@" -Zrandomize-layout --cfg=exhaustive\n''
-        > /tmp/randomize-layout.sh
+    - name: Checkout repository
+      uses: actions/checkout@v5
+    - name: Lean cache setup
+      run: 'mkdir -p /tmp/nix-lean-cache
 
-        chmod +x /tmp/randomize-layout.sh
+        chmod 0777 /tmp/nix-lean-cache
 
-        echo RUSTC_WORKSPACE_WRAPPER=/tmp/randomize-layout.sh >> $GITHUB_ENV
+        printf ''#!/bin/sh\nexport PATH=/nix/var/nix/profiles/default/bin:$PATH\nnix
+        copy --to "file:///tmp/nix-lean-cache?compression=zstd&parallel-compression=true"
+        $OUT_PATHS || true\n'' > /tmp/nix-lean-pbh.sh
+
+        chmod 0755 /tmp/nix-lean-pbh.sh
 
         '
-    - name: Download modified by pre-ci Cargo.toml files
-      uses: actions/download-artifact@v7
+      shell: bash
+    - name: Install Nix
+      uses: DeterminateSystems/nix-installer-action@main
       with:
-        name: modified-cargo-files
-    - run: cargo update
-    - run: cargo check
-    - run: cargo test
-    strategy:
-      fail-fast: false
-      matrix:
-        rust:
-        - nightly
-        - nightly-2026-09-28
-    timeout-minutes: 45
+        extra-conf: 'lazy-trees = true
+
+          post-build-hook = /tmp/nix-lean-pbh.sh
+
+          extra-substituters = file:///tmp/nix-lean-cache
+
+          extra-trusted-substituters = file:///tmp/nix-lean-cache
+
+          require-sigs = false
+
+          '
+    - name: Lean nix cache (built-only paths)
+      uses: actions/cache@v5
+      with:
+        key: nix-lean-${{ runner.os }}-${{ github.run_id }}
+        path: /tmp/nix-lean-cache
+        restore-keys: nix-lean-${{ runner.os }}-
+    - name: Run integration
+      run: nix run .#integration
+  pre_ci:
+    uses: valeratrades/.github/.github/workflows/pre_ci.yml@main
 name: Errors
 'on':
   pull_request: {}
